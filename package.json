@@ -1,0 +1,17 @@
+{
+  "name": "ccr",
+  "version": "0.1.0",
+  "description": "Browse Claude Code sessions across all working directories and resume any of them in place.",
+  "type": "module",
+  "bin": {
+    "ccr": "./ccr.mjs"
+  },
+  "scripts": {
+    "start": "node ccr.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "dependencies": {}
+}
