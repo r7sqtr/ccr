@@ -15,9 +15,13 @@ const COLORS = {
   green: `${ESC}[32m`,
   yellow: `${ESC}[33m`,
   cyan: `${ESC}[36m`,
+  magenta: `${ESC}[38;2;204;0;204m`,
   red: `${ESC}[31m`,
   gray: `${ESC}[90m`,
 };
+
+const MARGIN_X = 2;
+const MARGIN_Y = 1;
 
 function getClaudeHome() {
   if (process.env.CLAUDE_CONFIG_DIR) return process.env.CLAUDE_CONFIG_DIR;
@@ -546,39 +550,48 @@ function runPicker(metas, opts) {
   };
 
   const getSize = () => {
-    const cols = tty.output.columns || process.stdout.columns || 80;
-    const rows = tty.output.rows || process.stdout.rows || 24;
+    // process.stdout dims are refreshed by Node on SIGWINCH; the manually
+    // opened /dev/tty stream may not be, so prefer stdout when it is a TTY.
+    const cols = process.stdout.columns || tty.output.columns || 80;
+    const rows = process.stdout.rows || tty.output.rows || 24;
     return { cols, rows };
   };
 
   const render = () => {
     const { cols, rows } = getSize();
-    const showPreview = !opts.noPreview && cols >= 100;
-    const listW = showPreview ? Math.floor(cols * 0.55) : cols;
-    const previewX = listW + 2;
-    const previewW = cols - previewX;
+    const left = 1 + MARGIN_X;
+    const top = 1 + MARGIN_Y;
+    const innerCols = Math.max(20, cols - MARGIN_X * 2);
+    const innerRows = Math.max(5, rows - MARGIN_Y * 2);
+    const gap = 2;
+    const showPreview = !opts.noPreview && innerCols >= 96;
+    const listW = showPreview ? Math.floor(innerCols * 0.55) : innerCols;
+    const previewX = left + listW + gap;
+    const previewW = innerCols - listW - gap;
 
-    let buf = `${ESC}[H${ESC}[2J`; // home + clear
+    const at = (r, c) => `${ESC}[${r};${c}H`;
+    let buf = `${ESC}[2J`; // clear
 
     // header line
     const forkTag = state.fork ? ` ${COLORS.yellow}[fork]${COLORS.reset}` : '';
     const count = `${COLORS.gray}${state.filtered.length}/${metas.length}${COLORS.reset}`;
-    buf += `${COLORS.cyan}❯${COLORS.reset} ${state.query}${COLORS.dim}▏${COLORS.reset}  ${count}${forkTag}\n`;
-    buf += `${COLORS.gray}${'─'.repeat(Math.min(cols, listW))}${COLORS.reset}\n`;
+    buf +=
+      at(top, left) +
+      `${COLORS.magenta}❯${COLORS.reset} ${state.query}${COLORS.magenta}▏${COLORS.reset}  ${count}${forkTag}`;
+    buf += at(top + 1, left) + `${COLORS.gray}${'─'.repeat(listW)}${COLORS.reset}`;
 
     const headerRows = 2;
-    const pageRows = Math.max(1, rows - headerRows - 1);
+    const pageRows = Math.max(1, innerRows - headerRows);
 
     // scroll window
     if (state.cursor < state.windowTop) state.windowTop = state.cursor;
     if (state.cursor >= state.windowTop + pageRows) state.windowTop = state.cursor - pageRows + 1;
 
     const visible = state.filtered.slice(state.windowTop, state.windowTop + pageRows);
-    const lines = [];
     visible.forEach((mi, idx) => {
       const m = metas[mi];
       const selected = state.windowTop + idx === state.cursor;
-      const marker = selected ? `${COLORS.cyan}❯${COLORS.reset}` : ' ';
+      const marker = selected ? `${COLORS.magenta}❯${COLORS.reset}` : ' ';
       const runDot = m.isRunning
         ? `${COLORS.green}●${COLORS.reset}`
         : m.cwdExists
@@ -593,19 +606,16 @@ function runPicker(metas, opts) {
       const label = truncate(m.label, labelW);
       let row = `${marker}${runDot} ${COLORS.gray}${rel}${COLORS.reset} ${COLORS.dim}${cwdStr}${COLORS.reset}  ${label}`;
       if (selected) row = `${COLORS.bold}${row}${COLORS.reset}`;
-      lines.push(row);
+      buf += at(top + headerRows + idx, left) + row;
     });
-    buf += lines.join('\n');
 
     // preview pane (drawn with absolute cursor positioning)
     if (showPreview && state.filtered.length > 0) {
       const m = metas[state.filtered[state.cursor]];
       const pv = buildPreview(m, previewW);
-      let py = 1;
-      for (const pl of pv.slice(0, rows - 1)) {
-        buf += `${ESC}[${py};${previewX}H${pl}`;
-        py++;
-      }
+      pv.slice(0, innerRows).forEach((pl, i) => {
+        buf += at(top + i, previewX) + pl;
+      });
     }
 
     tty.write(buf);
@@ -618,6 +628,10 @@ function runPicker(metas, opts) {
       try {
         tty.input.removeListener('data', onData);
       } catch {}
+      try {
+        tty.output.removeListener?.('resize', onResize);
+      } catch {}
+      process.removeListener('SIGWINCH', onResize);
       process.removeListener('SIGINT', onSignal);
       process.removeListener('SIGTERM', onSignal);
       process.removeListener('exit', cleanup);
@@ -627,6 +641,7 @@ function runPicker(metas, opts) {
 
     const onResize = () => render();
     tty.output.on?.('resize', onResize);
+    process.on('SIGWINCH', onResize);
 
     const onData = (data) => {
       // handle possibly batched input
@@ -720,12 +735,12 @@ function buildPreview(m, width) {
   const wrap = (s) => wrapText(s, width);
   lines.push(`${COLORS.bold}${truncate(m.label, width)}${COLORS.reset}`);
   lines.push('');
-  lines.push(`${COLORS.cyan}cwd${COLORS.reset}  ${truncate(shortenPath(m.cwd), width - 5)}`);
+  lines.push(`${COLORS.magenta}cwd${COLORS.reset}  ${truncate(shortenPath(m.cwd), width - 5)}`);
   if (!m.cwdExists) lines.push(`${COLORS.red}     (directory no longer exists)${COLORS.reset}`);
-  if (m.gitBranch) lines.push(`${COLORS.cyan}git${COLORS.reset}  ${truncate(m.gitBranch, width - 5)}`);
-  lines.push(`${COLORS.cyan}id ${COLORS.reset}  ${COLORS.gray}${m.sessionId}${COLORS.reset}`);
-  if (m.slug) lines.push(`${COLORS.cyan}slug${COLORS.reset} ${COLORS.gray}${truncate(m.slug, width - 6)}${COLORS.reset}`);
-  lines.push(`${COLORS.cyan}time${COLORS.reset} ${absTime(m.mtimeMs)}  ${COLORS.gray}(${relativeTime(m.mtimeMs)})${COLORS.reset}`);
+  if (m.gitBranch) lines.push(`${COLORS.magenta}git${COLORS.reset}  ${truncate(m.gitBranch, width - 5)}`);
+  lines.push(`${COLORS.magenta}id ${COLORS.reset}  ${COLORS.gray}${m.sessionId}${COLORS.reset}`);
+  if (m.slug) lines.push(`${COLORS.magenta}slug${COLORS.reset} ${COLORS.gray}${truncate(m.slug, width - 6)}${COLORS.reset}`);
+  lines.push(`${COLORS.magenta}time${COLORS.reset} ${absTime(m.mtimeMs)}  ${COLORS.gray}(${relativeTime(m.mtimeMs)})${COLORS.reset}`);
   if (m.isRunning) lines.push(`${COLORS.green}● running${m.runningStatus ? ` (${m.runningStatus})` : ''}${COLORS.reset}`);
   lines.push('');
   lines.push(`${COLORS.gray}${'─'.repeat(Math.max(0, Math.min(width, 40)))}${COLORS.reset}`);
